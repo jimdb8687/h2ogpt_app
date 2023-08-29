@@ -38,3 +38,11 @@ Dockerfile_deps
 
 # virtual envs
 venv
+
+*.zip
+
+locks/
+
+sources_dir/
+
+*.lock
