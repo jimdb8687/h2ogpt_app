@@ -50,7 +50,7 @@ def fix_pydantic_duplicate_validators_error():
 fix_pydantic_duplicate_validators_error()
 
 from enums import DocumentSubset, no_model_str, no_lora_str, no_server_str, LangChainAction, LangChainMode, \
-    DocumentChoice, langchain_modes_intrinsic, LangChainTypes, langchain_modes_non_db
+    DocumentChoice, langchain_modes_intrinsic, LangChainTypes, langchain_modes_non_db, gr_to_lg
 from gradio_themes import H2oTheme, SoftTheme, get_h2o_title, get_simple_title, \
     get_dark_js, get_heap_js, wrap_js_to_lambda, \
     spacing_xsm, radius_xsm, text_xsm
@@ -58,7 +58,7 @@ from prompter import prompt_type_to_model_name, prompt_types_strings, inv_prompt
     get_prompt
 from utils import flatten_list, zip_data, s3up, clear_torch_cache, get_torch_allocated, system_info_print, \
     ping, makedirs, get_kwargs, system_info, ping_gpu, get_url, get_local_ip, \
-    save_generate_output, url_alive, remove, dict_to_html, text_to_html
+    save_generate_output, url_alive, remove, dict_to_html, text_to_html, lg_to_gr
 from gen import get_model, languages_covered, evaluate, score_qa, inputs_kwargs_list, \
     get_max_max_new_tokens, get_minmax_top_k_docs, history_to_context, langchain_actions, langchain_agents_list
 from evaluate_params import eval_func_param_names, no_default_param_names, eval_func_param_names_defaults, \
@@ -111,10 +111,7 @@ def go_gradio(**kwargs):
     hf_embedding_model = kwargs['hf_embedding_model']
     load_db_if_exists = kwargs['load_db_if_exists']
     migrate_embedding_model = kwargs['migrate_embedding_model']
-    enable_captions = kwargs['enable_captions']
     captions_model = kwargs['captions_model']
-    enable_ocr = kwargs['enable_ocr']
-    enable_pdf_ocr = kwargs['enable_pdf_ocr']
     caption_loader = kwargs['caption_loader']
 
     n_jobs = kwargs['n_jobs']
@@ -426,6 +423,11 @@ def go_gradio(**kwargs):
             allow = False
         return allow
 
+    image_loaders_options0, image_loaders_options, \
+        pdf_loaders_options0, pdf_loaders_options, \
+        url_loaders_options0, url_loaders_options = lg_to_gr(**kwargs)
+    jq_schema0 = '.[]'
+
     with (demo):
         # avoid actual model/tokenizer here or anything that would be bad to deepcopy
         # https://github.com/gradio-app/gradio/issues/3558
@@ -577,6 +579,8 @@ def go_gradio(**kwargs):
                                                     elem_id="warning", elem_classes="feedback",
                                                     )
                             fileup_output_text = gr.Textbox(visible=False)
+                    max_quality = gr.Checkbox(label="Maximum Ingest Quality", value=kwargs['max_quality'],
+                                              visible=not is_public)
                     url_visible = kwargs['langchain_mode'] != 'Disabled' and allow_upload and enable_url_upload
                     url_label = 'URL/ArXiv' if have_arxiv else 'URL'
                     url_text = gr.Textbox(label=url_label,
@@ -779,8 +783,11 @@ def go_gradio(**kwargs):
                                                                multiselect=False,
                                                                visible=True,
                                                                )
+                            info_view_raw = "Raw text shown if render of original doc fails"
+                            if is_public:
+                                info_view_raw += " (Up to %s chunks in public portal)" % kwargs['max_raw_chunks']
                             view_raw_text_checkbox = gr.Checkbox(label="View Database Text", value=False,
-                                                                 info="Raw text shown if render of original doc fails",
+                                                                 info=info_view_raw,
                                                                  visible=kwargs['db_type'] == 'chroma')
                         with gr.Column(scale=4):
                             pass
@@ -856,12 +863,22 @@ def go_gradio(**kwargs):
                             prompt_summary = gr.Textbox(label="Summary Prompt",
                                                         info="Added after documents (if query given, 'Focusing on {query}, ' is pre-appended)",
                                                         value=kwargs['prompt_summary'] or '')
-                    with gr.Row():
+                    with gr.Row(visible=not is_public):
+                        image_loaders = gr.CheckboxGroup(image_loaders_options,
+                                                         label="Force Image Reader",
+                                                         value=image_loaders_options0)
+                        pdf_loaders = gr.CheckboxGroup(pdf_loaders_options,
+                                                       label="Force PDF Reader",
+                                                       value=pdf_loaders_options0)
+                        url_loaders = gr.CheckboxGroup(url_loaders_options,
+                                                       label="Force URL Reader", value=url_loaders_options0)
+                        jq_schema = gr.Textbox(label="JSON jq_schema", value=jq_schema0)
+
                         min_top_k_docs, max_top_k_docs, label_top_k_docs = get_minmax_top_k_docs(is_public)
                         top_k_docs = gr.Slider(minimum=min_top_k_docs, maximum=max_top_k_docs, step=1,
                                                value=kwargs['top_k_docs'],
                                                label=label_top_k_docs,
-                                               info="For LangChain",
+                                               # info="For LangChain",
                                                visible=kwargs['langchain_mode'] != 'Disabled',
                                                interactive=not is_public)
                         chunk_size = gr.Number(value=kwargs['chunk_size'],
@@ -877,11 +894,15 @@ def go_gradio(**kwargs):
                                                        info="For LangChain",
                                                        visible=kwargs['langchain_mode'] != 'Disabled',
                                                        interactive=not is_public)
+                        embed = gr.components.Checkbox(value=True,
+                                                       label="Whether to embed text",
+                                                       info="For LangChain",
+                                                       visible=False)
                     with gr.Row():
                         stream_output = gr.components.Checkbox(label="Stream output",
                                                                value=kwargs['stream_output'])
                         do_sample = gr.Checkbox(label="Sample",
-                                                info="Enable sampler, required for use of temperature, top_p, top_k",
+                                                info="Enable sampler (required for use of temperature, top_p, top_k)",
                                                 value=kwargs['do_sample'])
                         max_time = gr.Slider(minimum=0, maximum=kwargs['max_max_time'], step=1,
                                              value=min(kwargs['max_max_time'],
@@ -890,7 +911,7 @@ def go_gradio(**kwargs):
                         temperature = gr.Slider(minimum=0.01, maximum=2,
                                                 value=kwargs['temperature'],
                                                 label="Temperature",
-                                                info="Lower is deterministic (but may lead to repeats), Higher more creative (but may lead to hallucinations)")
+                                                info="Lower is deterministic, higher more creative")
                         top_p = gr.Slider(minimum=1e-3, maximum=1.0 - 1e-3,
                                           value=kwargs['top_p'], label="Top p",
                                           info="Cumulative probability of tokens to sample from")
@@ -1254,17 +1275,31 @@ def go_gradio(**kwargs):
         def clear_file_list():
             return None
 
-        def make_non_interactive(*args):
-            if len(args) == 1:
-                return gr.update(interactive=False)
+        def set_loaders(max_quality1,
+                        image_loaders_options1=None,
+                        pdf_loaders_options1=None,
+                        url_loaders_options1=None,
+                        image_loaders_options01=None,
+                        pdf_loaders_options01=None,
+                        url_loaders_options01=None,
+                        ):
+            if not max_quality1:
+                return image_loaders_options01, pdf_loaders_options01, url_loaders_options01
             else:
-                return tuple([gr.update(interactive=False)] * len(args))
+                return image_loaders_options1, pdf_loaders_options1, url_loaders_options1
 
-        def make_interactive(*args):
-            if len(args) == 1:
-                return gr.update(interactive=True)
-            else:
-                return tuple([gr.update(interactive=True)] * len(args))
+        set_loaders_func = functools.partial(set_loaders,
+                                             image_loaders_options1=image_loaders_options,
+                                             pdf_loaders_options1=pdf_loaders_options,
+                                             url_loaders_options1=url_loaders_options,
+                                             image_loaders_options01=image_loaders_options0,
+                                             pdf_loaders_options01=pdf_loaders_options0,
+                                             url_loaders_options01=url_loaders_options0,
+                                             )
+
+        max_quality.change(fn=set_loaders_func,
+                           inputs=max_quality,
+                           outputs=[image_loaders, pdf_loaders, url_loaders])
 
         # Add to UserData or custom user db
         update_db_func = functools.partial(update_user_db_gr,
@@ -1274,18 +1309,24 @@ def go_gradio(**kwargs):
                                            hf_embedding_model=hf_embedding_model,
                                            migrate_embedding_model=migrate_embedding_model,
                                            captions_model=captions_model,
-                                           enable_captions=enable_captions,
                                            caption_loader=caption_loader,
-                                           enable_ocr=enable_ocr,
-                                           enable_pdf_ocr=enable_pdf_ocr,
                                            verbose=kwargs['verbose'],
                                            n_jobs=kwargs['n_jobs'],
                                            get_userid_auth=get_userid_auth,
+                                           image_loaders_options0=image_loaders_options0,
+                                           pdf_loaders_options0=pdf_loaders_options0,
+                                           url_loaders_options0=url_loaders_options0,
+                                           jq_schema0=jq_schema0,
                                            )
         add_file_outputs = [fileup_output, langchain_mode]
         add_file_kwargs = dict(fn=update_db_func,
                                inputs=[fileup_output, my_db_state, selection_docs_state, requests_state,
-                                       chunk, chunk_size, langchain_mode],
+                                       langchain_mode, chunk, chunk_size, embed,
+                                       image_loaders,
+                                       pdf_loaders,
+                                       url_loaders,
+                                       jq_schema,
+                                       ],
                                outputs=add_file_outputs + [sources_text, doc_exception_text],
                                queue=queue,
                                api_name='add_file' if allow_upload_api else None)
@@ -1296,13 +1337,15 @@ def go_gradio(**kwargs):
                                          outputs=[my_db_state, requests_state, langchain_mode],
                                          show_progress='minimal')
         eventdb1 = eventdb1a.then(**add_file_kwargs, show_progress='full')
-        eventdb1b = eventdb1.then(make_interactive, inputs=add_file_outputs, outputs=add_file_outputs,
-                                  show_progress='minimal')
-
         # deal with challenge to have fileup_output itself as input
         add_file_kwargs2 = dict(fn=update_db_func,
                                 inputs=[fileup_output_text, my_db_state, selection_docs_state, requests_state,
-                                        chunk, chunk_size, langchain_mode],
+                                        langchain_mode, chunk, chunk_size, embed,
+                                        image_loaders,
+                                        pdf_loaders,
+                                        url_loaders,
+                                        jq_schema,
+                                        ],
                                 outputs=add_file_outputs + [sources_text, doc_exception_text],
                                 queue=queue,
                                 api_name='add_file_api' if allow_upload_api else None)
@@ -1318,7 +1361,12 @@ def go_gradio(**kwargs):
         add_url_outputs = [url_text, langchain_mode]
         add_url_kwargs = dict(fn=update_user_db_url_func,
                               inputs=[url_text, my_db_state, selection_docs_state, requests_state,
-                                      chunk, chunk_size, langchain_mode],
+                                      langchain_mode, chunk, chunk_size, embed,
+                                      image_loaders,
+                                      pdf_loaders,
+                                      url_loaders,
+                                      jq_schema,
+                                      ],
                               outputs=add_url_outputs + [sources_text, doc_exception_text],
                               queue=queue,
                               api_name='add_url' if allow_upload_api else None)
@@ -1329,17 +1377,18 @@ def go_gradio(**kwargs):
                                     queue=queue,
                                     show_progress='minimal')
         # work around https://github.com/gradio-app/gradio/issues/4733
-        eventdb2b = eventdb2a.then(make_non_interactive, inputs=add_url_outputs, outputs=add_url_outputs,
-                                   show_progress='minimal')
-        eventdb2 = eventdb2b.then(**add_url_kwargs, show_progress='full')
-        eventdb2c = eventdb2.then(make_interactive, inputs=add_url_outputs, outputs=add_url_outputs,
-                                  show_progress='minimal')
+        eventdb2 = eventdb2a.then(**add_url_kwargs, show_progress='full')
 
         update_user_db_txt_func = functools.partial(update_db_func, is_txt=True)
         add_text_outputs = [user_text_text, langchain_mode]
         add_text_kwargs = dict(fn=update_user_db_txt_func,
                                inputs=[user_text_text, my_db_state, selection_docs_state, requests_state,
-                                       chunk, chunk_size, langchain_mode],
+                                       langchain_mode, chunk, chunk_size, embed,
+                                       image_loaders,
+                                       pdf_loaders,
+                                       url_loaders,
+                                       jq_schema,
+                                       ],
                                outputs=add_text_outputs + [sources_text, doc_exception_text],
                                queue=queue,
                                api_name='add_text' if allow_upload_api else None
@@ -1349,14 +1398,10 @@ def go_gradio(**kwargs):
                                           outputs=[my_db_state, requests_state, user_text_text],
                                           queue=queue,
                                           show_progress='minimal')
-        eventdb3b = eventdb3a.then(make_non_interactive, inputs=add_text_outputs, outputs=add_text_outputs,
-                                   show_progress='minimal')
-        eventdb3 = eventdb3b.then(**add_text_kwargs, show_progress='full')
-        eventdb3c = eventdb3.then(make_interactive, inputs=add_text_outputs, outputs=add_text_outputs,
-                                  show_progress='minimal')
-        db_events = [eventdb1a, eventdb1, eventdb1b, eventdb1_api,
-                     eventdb2a, eventdb2, eventdb2b, eventdb2c,
-                     eventdb3a, eventdb3b, eventdb3, eventdb3c]
+        eventdb3 = eventdb3a.then(**add_text_kwargs, show_progress='full')
+        db_events = [eventdb1a, eventdb1, eventdb1_api,
+                     eventdb2a, eventdb2,
+                     eventdb3a, eventdb3]
 
         get_sources1 = functools.partial(get_sources_gr, dbs=dbs, docs_state0=docs_state0,
                                          load_db_if_exists=load_db_if_exists,
@@ -1492,7 +1537,8 @@ def go_gradio(**kwargs):
                      hf_embedding_model1=None,
                      migrate_embedding_model1=None,
                      verbose1=False,
-                     get_userid_auth1=None):
+                     get_userid_auth1=None,
+                     max_raw_chunks=1000000):
             file = single_document_choice1
             document_choice1 = [single_document_choice1]
             content = None
@@ -1532,13 +1578,15 @@ def go_gradio(**kwargs):
                 docs_with_score = [(Document(page_content=result[0], metadata=result[1] or {}), 0)
                                    for result in zip(db_documents, db_metadatas)]
                 doc_chunk_ids = [x.get('chunk_id', -1) for x in db_metadatas]
+                doc_page_ids = [x.get('page', 0) for x in db_metadatas]
                 doc_hashes = [x.get('doc_hash', 'None') for x in db_metadatas]
-                docs_with_score = [x for hx, cx, x in
-                                   sorted(zip(doc_hashes, doc_chunk_ids, docs_with_score), key=lambda x: (x[0], x[1]))
+                docs_with_score = [x for hx, px, cx, x in
+                                   sorted(zip(doc_hashes, doc_page_ids, doc_chunk_ids, docs_with_score),
+                                          key=lambda x: (x[0], x[1]))
                                    # if cx == -1
                                    ]
-                db_metadatas = [x[0].metadata for x in docs_with_score]
-                db_documents = [x[0].page_content for x in docs_with_score]
+                db_metadatas = [x[0].metadata for x in docs_with_score][:max_raw_chunks]
+                db_documents = [x[0].page_content for x in docs_with_score][:max_raw_chunks]
                 # done reordering
                 if view_raw_text_checkbox1:
                     content = [dict_to_html(x) + '\n' + text_to_html(y) for x, y in zip(db_metadatas, db_documents)]
@@ -1669,7 +1717,9 @@ def go_gradio(**kwargs):
                                           hf_embedding_model1=hf_embedding_model,
                                           migrate_embedding_model1=migrate_embedding_model,
                                           verbose1=verbose,
-                                          get_userid_auth1=get_userid_auth)
+                                          get_userid_auth1=get_userid_auth,
+                                          max_raw_chunks=kwargs['max_raw_chunks'],
+                                          )
         eventdb_viewa.then(fn=show_doc_func,
                            inputs=[my_db_state, selection_docs_state, requests_state, langchain_mode,
                                    view_document_choice, view_raw_text_checkbox],
@@ -1681,6 +1731,8 @@ def go_gradio(**kwargs):
         all_kwargs.update(locals())
 
         refresh_sources1 = functools.partial(update_and_get_source_files_given_langchain_mode_gr,
+                                             captions_model=captions_model,
+                                             caption_loader=caption_loader,
                                              dbs=dbs,
                                              first_para=kwargs['first_para'],
                                              hf_embedding_model=hf_embedding_model,
@@ -1690,7 +1742,12 @@ def go_gradio(**kwargs):
                                              db_type=db_type,
                                              load_db_if_exists=load_db_if_exists,
                                              n_jobs=n_jobs, verbose=verbose,
-                                             get_userid_auth=get_userid_auth)
+                                             get_userid_auth=get_userid_auth,
+                                             image_loaders_options0=image_loaders_options0,
+                                             pdf_loaders_options0=pdf_loaders_options0,
+                                             url_loaders_options0=url_loaders_options0,
+                                             jq_schema0=jq_schema0,
+                                             )
         eventdb9a = refresh_sources_btn.click(user_state_setup,
                                               inputs=[my_db_state, requests_state,
                                                       refresh_sources_btn, refresh_sources_btn],
@@ -1698,7 +1755,12 @@ def go_gradio(**kwargs):
                                               show_progress='minimal')
         eventdb9 = eventdb9a.then(fn=refresh_sources1,
                                   inputs=[my_db_state, selection_docs_state, requests_state,
-                                          langchain_mode, chunk, chunk_size],
+                                          langchain_mode, chunk, chunk_size,
+                                          image_loaders,
+                                          pdf_loaders,
+                                          url_loaders,
+                                          jq_schema,
+                                          ],
                                   outputs=sources_text,
                                   api_name='refresh_sources' if allow_api else None)
 
@@ -2158,6 +2220,13 @@ def go_gradio(**kwargs):
                 user_kwargs = ast.literal_eval(user_kwargs)
             else:
                 user_kwargs = {k: v for k, v in zip(eval_func_param_names, args_list[len(input_args_list):])}
+            # control kwargs1 for evaluate
+            kwargs1['answer_with_sources'] = -1  # just text chunk, not URL etc.
+            kwargs1['show_accordions'] = False
+            kwargs1['append_sources_to_answer'] = False
+            kwargs1['show_link_in_sources'] = False
+            kwargs1['top_k_docs_max_show'] = 30
+
             # only used for submit_nochat_api
             user_kwargs['chat'] = False
             if 'stream_output' not in user_kwargs:
@@ -3627,6 +3696,7 @@ def go_gradio(**kwargs):
 
     # set port in case GRADIO_SERVER_PORT was already set in prior main() call,
     # gradio does not listen if change after import
+    # Keep None if not set so can find an open port above used ports
     server_port = os.getenv('GRADIO_SERVER_PORT')
     if server_port is not None:
         server_port = int(server_port)
@@ -3640,8 +3710,9 @@ def go_gradio(**kwargs):
                 auth=auth,
                 auth_message=auth_message,
                 root_path=kwargs['root_path'])
-    if kwargs['verbose']:
-        print("Started GUI", flush=True)
+    if kwargs['verbose'] or not (kwargs['base_model'] in ['gptj', 'gpt4all_llama']):
+        print("Started Gradio Server and/or GUI: server_name: %s port: %s" % (kwargs['server_name'], server_port),
+              flush=True)
     if kwargs['block_gradio_exit']:
         demo.block_thread()
 
@@ -3680,12 +3751,45 @@ def get_inputs_list(inputs_dict, model_lower, model_id=1):
 
 
 def update_user_db_gr(file, db1s, selection_docs_state1, requests_state1,
-                      chunk, chunk_size, langchain_mode, dbs=None,
+                      langchain_mode, chunk, chunk_size, embed,
+
+                      image_loaders,
+                      pdf_loaders,
+                      url_loaders,
+                      jq_schema,
+
+                      captions_model=None,
+                      caption_loader=None,
+
+                      dbs=None,
                       get_userid_auth=None,
                       **kwargs):
+    loaders_dict, captions_model = gr_to_lg(image_loaders,
+                                            pdf_loaders,
+                                            url_loaders,
+                                            captions_model=captions_model,
+                                            **kwargs,
+                                            )
+    if jq_schema is None:
+        jq_schema = kwargs['jq_schema0']
+    loaders_dict.update(dict(captions_model=captions_model,
+                             caption_loader=caption_loader,
+                             jq_schema=jq_schema,
+                             ))
+    kwargs.pop('image_loaders_options0', None)
+    kwargs.pop('pdf_loaders_options0', None)
+    kwargs.pop('url_loaders_options0', None)
+    kwargs.pop('jq_schema0', None)
+    if not embed:
+        kwargs['use_openai_embedding'] = False
+        kwargs['hf_embedding_model'] = 'fake'
+        kwargs['migrate_embedding_model'] = False
+
     from src.gpt_langchain import update_user_db
     return update_user_db(file, db1s, selection_docs_state1, requests_state1,
-                          chunk, chunk_size, langchain_mode, dbs=dbs,
+                          langchain_mode=langchain_mode, chunk=chunk, chunk_size=chunk_size,
+                          **loaders_dict,
+                          dbs=dbs,
                           get_userid_auth=get_userid_auth,
                           **kwargs)
 
@@ -3767,18 +3871,48 @@ def update_and_get_source_files_given_langchain_mode_gr(db1s,
                                                         selection_docs_state,
                                                         requests_state,
                                                         langchain_mode, chunk, chunk_size,
+
+                                                        image_loaders,
+                                                        pdf_loaders,
+                                                        url_loaders,
+                                                        jq_schema,
+
+                                                        captions_model=None,
+                                                        caption_loader=None,
+
                                                         dbs=None, first_para=None,
                                                         hf_embedding_model=None,
                                                         use_openai_embedding=None,
                                                         migrate_embedding_model=None,
                                                         text_limit=None,
                                                         db_type=None, load_db_if_exists=None,
-                                                        n_jobs=None, verbose=None, get_userid_auth=None):
+                                                        n_jobs=None, verbose=None, get_userid_auth=None,
+                                                        image_loaders_options0=None,
+                                                        pdf_loaders_options0=None,
+                                                        url_loaders_options0=None,
+                                                        jq_schema0=None):
     from src.gpt_langchain import update_and_get_source_files_given_langchain_mode
+
+    loaders_dict, captions_model = gr_to_lg(image_loaders,
+                                            pdf_loaders,
+                                            url_loaders,
+                                            image_loaders_options0=image_loaders_options0,
+                                            pdf_loaders_options0=pdf_loaders_options0,
+                                            url_loaders_options0=url_loaders_options0,
+                                            captions_model=captions_model,
+                                            )
+    if jq_schema is None:
+        jq_schema = jq_schema0
+    loaders_dict.update(dict(captions_model=captions_model,
+                             caption_loader=caption_loader,
+                             jq_schema=jq_schema,
+                             ))
+
     return update_and_get_source_files_given_langchain_mode(db1s,
                                                             selection_docs_state,
                                                             requests_state,
                                                             langchain_mode, chunk, chunk_size,
+                                                            **loaders_dict,
                                                             dbs=dbs, first_para=first_para,
                                                             hf_embedding_model=hf_embedding_model,
                                                             use_openai_embedding=use_openai_embedding,

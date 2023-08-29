@@ -26,11 +26,11 @@ warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is
 from evaluate_params import eval_func_param_names, no_default_param_names, input_args_list
 from enums import DocumentSubset, LangChainMode, no_lora_str, model_token_mapping, no_model_str, \
     LangChainAction, LangChainAgent, DocumentChoice, LangChainTypes, super_source_prefix, \
-    super_source_postfix, t5_type, get_langchain_prompts
+    super_source_postfix, t5_type, get_langchain_prompts, gr_to_lg
 from loaders import get_loaders
 from utils import set_seed, clear_torch_cache, NullContext, wrapped_partial, EThread, get_githash, \
     import_matplotlib, get_device, makedirs, get_kwargs, start_faulthandler, get_hf_server, FakeTokenizer, \
-    have_langchain, set_openai, cuda_vis_check, H2O_Fire
+    have_langchain, set_openai, cuda_vis_check, H2O_Fire, lg_to_gr, get_ngpus_vis
 
 start_faulthandler()
 import_matplotlib()
@@ -165,6 +165,7 @@ def main(
         visible_hosts_tab: bool = False,
         chat_tables: bool = False,
         visible_h2ogpt_header: bool = True,
+        max_raw_chunks: int = None,
 
         sanitize_user_prompt: bool = False,
         sanitize_bot_response: bool = False,
@@ -210,6 +211,7 @@ def main(
         answer_with_sources: bool = True,
         append_sources_to_answer: bool = True,
         show_accordions: bool = True,
+        top_k_docs_max_show: int = 10,
         show_link_in_sources: bool = True,
         pre_prompt_query: str = None,
         prompt_query: str = None,
@@ -231,12 +233,34 @@ def main(
         auto_reduce_chunks: bool = True,
         max_chunks: int = 100,
         n_jobs: int = -1,
-        enable_captions: bool = True,
-        captions_model: str = "Salesforce/blip-image-captioning-base",
+
+        # urls
+        use_unstructured=True,
+        use_playwright=False,
+        use_selenium=False,
+
+        # pdfs
+        use_pymupdf=True,
+        use_unstructured_pdf=False,
+        use_pypdf=False,
+        enable_pdf_ocr='auto',
+        try_pdf_as_html=True,
+
+        # images
+        enable_ocr=False,
+        enable_doctr=False,
+        enable_captions=True,
         pre_load_caption_model: bool = False,
         caption_gpu: bool = True,
-        enable_ocr: bool = False,
-        enable_pdf_ocr: str = 'auto',
+        captions_model: str = "Salesforce/blip-image-captioning-base",
+        caption_loader=None,
+        doctr_loader=None,
+
+        # json
+        jq_schema='.[]',
+
+        max_quality: bool = False,
+
         enable_heap_analytics: bool = True,
         heap_app_id: str = "1680123994",
 ):
@@ -495,6 +519,7 @@ def main(
     :param answer_with_sources: Whether to determine (and return) sources
     :param append_sources_to_answer: Whether to place source information in chat response (ignored by LLM).  Always disabled for API.
     :param show_accordions: whether to show accordion for document references in chatbot UI
+    :param top_k_docs_max_show: Max number of docs to show in UI for sources
     :param show_link_in_sources: Whether to show URL link to source document in references
     :param pre_prompt_query: prompt before documents to query, if None then use internal defaults
     :param prompt_query: prompt after documents to query, if None then use internal defaults
@@ -528,7 +553,8 @@ def main(
     :param auto_reduce_chunks: Whether to automatically reduce top_k_docs to fit context given prompt
     :param max_chunks: If top_k_docs=-1, maximum number of chunks to allow
     :param n_jobs: Number of processors to use when consuming documents (-1 = all, is default)
-    :param enable_captions: Whether to support captions using BLIP for image files as documents, then preloads that model
+    :param enable_captions: Whether to support captions using BLIP for image files as documents,
+           then preloads that model if pre_load_caption_model=True
     :param captions_model: Which model to use for captions.
            captions_model: str = "Salesforce/blip-image-captioning-base",  # continue capable
            captions_model: str = "Salesforce/blip2-flan-t5-xl",   # question/answer capable, 16GB state
@@ -540,6 +566,7 @@ def main(
            Recommended if using larger caption model
     :param caption_gpu: If support caption, then use GPU if exists
     :param enable_ocr: Whether to support OCR on images
+    :param enable_doctr: Whether to support doctr on images
     :param enable_pdf_ocr: 'auto' means only use OCR if normal text extraction fails.  Useful for pure image-based PDFs with text
                             'on' means always do OCR as additional parsing of same documents
                             'off' means don't do OCR (e.g. because it's slow even if 'auto' only would trigger if nothing else worked)
@@ -660,6 +687,8 @@ def main(
         allow_upload_to_user_data = False
         if LangChainMode.USER_DATA.value in langchain_modes:
             langchain_modes.remove(LangChainMode.USER_DATA.value)
+    if max_raw_chunks is None:
+        max_raw_chunks = 30 if is_public else 1000000
 
     # in-place, for non-scratch dbs
     if allow_upload_to_user_data:
@@ -832,6 +861,15 @@ def main(
     if offload_folder:
         offload_folder = makedirs(offload_folder, exist_ok=True, tmp_ok=True, use_base=True)
 
+    image_loaders_options0, image_loaders_options, \
+        pdf_loaders_options0, pdf_loaders_options, \
+        url_loaders_options0, url_loaders_options = lg_to_gr(**locals())
+    jq_schema0 = jq_schema
+    # transcribe
+    image_loaders = image_loaders_options0
+    pdf_loaders = pdf_loaders_options0
+    url_loaders = url_loaders_options0
+
     placeholder_instruction, placeholder_input, \
         stream_output, show_examples, \
         prompt_type, prompt_dict, \
@@ -856,6 +894,10 @@ def main(
                             top_k_docs,
                             chunk,
                             chunk_size,
+                            image_loaders,
+                            pdf_loaders,
+                            url_loaders,
+                            jq_schema,
                             verbose,
                             )
 
@@ -930,9 +972,9 @@ def main(
         model_name = base_model
         pre_prompt_query, prompt_query, pre_prompt_summary, prompt_summary = \
             get_langchain_prompts(pre_prompt_query, prompt_query,
-                             pre_prompt_summary, prompt_summary,
-                             model_name, inference_server,
-                             model_path_llama)
+                                  pre_prompt_summary, prompt_summary,
+                                  model_name, inference_server,
+                                  model_path_llama)
 
     if cli:
         from cli import run_cli
@@ -967,7 +1009,8 @@ def main(
             model_dict['lora_weights'] = model_dict.get('lora_weights', '')
             model_dict['inference_server'] = model_dict.get('inference_server', '')
             prompt_type_infer = not model_dict.get('prompt_type')
-            model_dict['prompt_type'] = model_dict.get('prompt_type', model_list0[0]['prompt_type'])  # don't use mutated value
+            model_dict['prompt_type'] = model_dict.get('prompt_type',
+                                                       model_list0[0]['prompt_type'])  # don't use mutated value
             # rest of generic defaults
             for k in model_list0[0]:
                 if k not in model_dict:
@@ -977,10 +1020,10 @@ def main(
             # get query prompt for (say) last base model if using model lock
             pre_prompt_query1, prompt_query1, pre_prompt_summary1, prompt_summary1 = (
                 get_langchain_prompts(pre_prompt_query, prompt_query,
-                                 pre_prompt_summary, prompt_summary,
-                                 model_dict['base_model'],
-                                 model_dict['inference_server'],
-                                 model_dict['model_path_llama']))
+                                      pre_prompt_summary, prompt_summary,
+                                      model_dict['base_model'],
+                                      model_dict['inference_server'],
+                                      model_dict['model_path_llama']))
             # if mixed setup, choose non-empty so best models best
             # FIXME: Make per model dict passed through to evaluate
             pre_prompt_query = pre_prompt_query or pre_prompt_query1
@@ -994,8 +1037,9 @@ def main(
                 if model_lower1 in inv_prompt_type_to_model_lower:
                     model_dict['prompt_type'] = inv_prompt_type_to_model_lower[model_lower1]
                     model_dict['prompt_dict'], error0 = get_prompt(model_dict['prompt_type'], '',
-                                                      chat=False, context='', reduced=False, making_context=False,
-                                                      return_dict=True)
+                                                                   chat=False, context='', reduced=False,
+                                                                   making_context=False,
+                                                                   return_dict=True)
                 else:
                     model_dict['prompt_dict'] = prompt_dict
             else:
@@ -1008,8 +1052,6 @@ def main(
                 model0, tokenizer0, device = get_model(reward_type=False,
                                                        **get_kwargs(get_model, exclude_names=['reward_type'],
                                                                     **all_kwargs))
-                # update to be consistent with what is passed from CLI and model chose
-                max_seq_len = tokenizer0.model_max_length
             else:
                 # if empty model, then don't load anything, just get gradio up
                 model0, tokenizer0, device = None, None, None
@@ -1032,6 +1074,12 @@ def main(
             else:
                 model_state0 = model_state_trial.copy()
             assert len(model_state_none) == len(model_state0)
+
+        # update to be consistent with what is passed from CLI and model chose
+        # do after go over all models if multi-model, so don't contaminate
+        # This is just so UI shows reasonable correct value, not 2048 dummy value
+        if len(model_states) >= 1:
+            max_seq_len = model_states[0]['tokenizer'].model_max_length
 
         # get score model
         all_kwargs = locals().copy()
@@ -1076,7 +1124,7 @@ def get_config(base_model,
                                                 trust_remote_code=trust_remote_code,
                                                 offload_folder=offload_folder,
                                                 revision=revision,
-                                                rope_scaling=rope_scaling)
+                                                rope_scaling=rope_scaling if rope_scaling else None)
         except OSError as e:
             if raise_exception:
                 raise
@@ -1179,7 +1227,8 @@ def get_non_lora_model(base_model, model_loader, load_half,
     else:
         device_map = "auto"
 
-    n_gpus = torch.cuda.device_count() if torch.cuda.is_available else 0
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    n_gpus, gpu_ids = cuda_vis_check(n_gpus)
 
     if n_gpus > 0:
         if gpu_id >= 0:
@@ -1223,11 +1272,14 @@ def get_non_lora_model(base_model, model_loader, load_half,
             **model_kwargs,
         )
     else:
+
         model = model_loader(
             base_model,
             config=config,
             **model_kwargs,
-        ).half()
+        )
+        if not getattr(model, "is_quantized", False):
+            model = model.half()
     return model
 
 
@@ -1573,25 +1625,27 @@ def get_hf_model(load_8bit: bool = False,
             model_kwargs.pop('torch_dtype', None)
         pop_unused_model_kwargs(model_kwargs)
 
-        if low_bit_mode == 1:
+        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        n_gpus, gpu_ids = cuda_vis_check(n_gpus)
+        if low_bit_mode == 1 and n_gpus != 0:
             from transformers import BitsAndBytesConfig
             model_kwargs['quantization_config'] = BitsAndBytesConfig(bnb_4bit_compute_dtype=torch.bfloat16,
                                                                      load_in_4bit=load_4bit,
                                                                      load_in_8bit=load_8bit,
                                                                      )
-        elif low_bit_mode == 2:
+        elif low_bit_mode == 2 and n_gpus != 0:
             from transformers import BitsAndBytesConfig
             model_kwargs['quantization_config'] = BitsAndBytesConfig(bnb_4bit_quant_type="nf4",
                                                                      load_in_4bit=load_4bit,
                                                                      load_in_8bit=load_8bit,
                                                                      )
-        elif low_bit_mode == 3:
+        elif low_bit_mode == 3 and n_gpus != 0:
             from transformers import BitsAndBytesConfig
             model_kwargs['quantization_config'] = BitsAndBytesConfig(bnb_4bit_use_double_quant=True,
                                                                      load_in_4bit=load_4bit,
                                                                      load_in_8bit=load_8bit,
                                                                      )
-        elif low_bit_mode == 4:
+        elif low_bit_mode == 4 and n_gpus != 0:
             from transformers import BitsAndBytesConfig
             model_kwargs['quantization_config'] = BitsAndBytesConfig(bnb_4bit_use_double_quant=True,
                                                                      bnb_4bit_quant_type="nf4",
@@ -1621,7 +1675,9 @@ def get_hf_model(load_8bit: bool = False,
                         model = model_loader(
                             base_model,
                             config=config,
-                            **model_kwargs).half()
+                            **model_kwargs)
+                        if not getattr(model, "is_quantized", False):
+                            model = model.half()
                     else:
                         model = model_loader(
                             base_model,
@@ -1670,7 +1726,8 @@ def get_hf_model(load_8bit: bool = False,
                     device_map="auto",
                 )
                 if load_half and not load_gptq:
-                    model.half()
+                    if not getattr(model, "is_quantized", False):
+                        model = model.half()
 
     # unwind broken decapoda-research config
     if llama_type:
@@ -1815,7 +1872,16 @@ def evaluate(
         pre_prompt_summary,
         prompt_summary,
         system_prompt,
+
+        image_loaders,
+        pdf_loaders,
+        url_loaders,
+        jq_schema,
+
         # END NOTE: Examples must have same order of parameters
+        captions_model=None,
+        caption_loader=None,
+        doctr_loader=None,
         async_output=None,
         num_async=None,
         src_lang=None,
@@ -1846,6 +1912,7 @@ def evaluate(
         first_para=None,
         text_limit=None,
         show_accordions=None,
+        top_k_docs_max_show=None,
         show_link_in_sources=None,
         verbose=False,
         cli=False,
@@ -1859,6 +1926,10 @@ def evaluate(
         load_exllama=None,
         answer_with_sources=None,
         append_sources_to_answer=None,
+        image_loaders_options0=None,
+        pdf_loaders_options0=None,
+        url_loaders_options0=None,
+        jq_schema0=None,
 ):
     # ensure passed these
     assert concurrency_count is not None
@@ -1877,6 +1948,15 @@ def evaluate(
     assert first_para is not None
     assert isinstance(add_chat_history_to_context, bool)
     assert load_exllama is not None
+    # for lazy client (even chat client)
+    if image_loaders is None:
+        image_loaders = image_loaders_options0
+    if pdf_loaders is None:
+        pdf_loaders = pdf_loaders_options0
+    if url_loaders is None:
+        url_loaders = url_loaders_options0
+    if jq_schema is None:
+        jq_schema = jq_schema0
 
     langchain_modes = selection_docs_state['langchain_modes']
     langchain_mode_paths = selection_docs_state['langchain_mode_paths']
@@ -2043,6 +2123,16 @@ def evaluate(
                                    max_time=max_time,
                                    num_return_sequences=num_return_sequences,
                                    )
+        loaders_dict, captions_model = gr_to_lg(image_loaders,
+                                                pdf_loaders,
+                                                url_loaders,
+                                                captions_model=captions_model,
+                                                )
+        loaders_dict.update(dict(captions_model=captions_model,
+                                 caption_loader=caption_loader,
+                                 jq_schema=jq_schema,
+                                 doctr_loader=doctr_loader
+                                 ))
         for r in run_qa_db(
                 inference_server=inference_server,
                 model_name=base_model, model=model, tokenizer=tokenizer,
@@ -2068,6 +2158,7 @@ def evaluate(
                 first_para=first_para,
                 text_limit=text_limit,
                 show_accordions=show_accordions,
+                top_k_docs_max_show=top_k_docs_max_show,
                 show_link_in_sources=show_link_in_sources,
 
                 # evaluate args items
@@ -2077,6 +2168,9 @@ def evaluate(
                 stream_output=stream_output,
                 chunk=chunk,
                 chunk_size=chunk_size,
+
+                **loaders_dict,
+
                 langchain_mode=langchain_mode,
                 langchain_action=langchain_action,
                 langchain_agents=langchain_agents,
@@ -2776,7 +2870,12 @@ def get_generate_params(model_lower,
                         repetition_penalty, num_return_sequences,
                         do_sample,
                         top_k_docs, chunk, chunk_size,
-                        verbose):
+                        image_loaders,
+                        pdf_loaders,
+                        url_loaders,
+                        jq_schema,
+                        verbose,
+                        ):
     use_defaults = False
     use_default_examples = True
     examples = []
@@ -2945,6 +3044,10 @@ y = np.random.randint(0, 1, 100)
                     pre_prompt_query, prompt_query,
                     pre_prompt_summary, prompt_summary,
                     system_prompt,
+                    image_loaders,
+                    pdf_loaders,
+                    url_loaders,
+                    jq_schema,
                     ]
         # adjust examples if non-chat mode
         if not chat:

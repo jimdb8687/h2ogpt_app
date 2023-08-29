@@ -11,6 +11,8 @@ from src.utils import download_simple
 
 results_file = "./benchmarks/perf.json"
 
+@pytest.mark.skipif(not os.getenv('BENCHMARK'),
+                    reason="Only for benchmarking")
 @pytest.mark.parametrize("backend", [
     # 'transformers',
     # 'text-generation-inference',
@@ -151,7 +153,12 @@ def test_perf_benchmarks(backend, base_model, task, bits, ngpus):
             chunk = True
             chunk_size = 512
             langchain_mode = 'MyData'
-            res = client.predict(test_file_server, chunk, chunk_size, langchain_mode, api_name='/add_file_api')
+            embed = True
+            loaders = tuple([None, None, None, None])
+            res = client.predict(test_file_server,
+                                 chunk, chunk_size, langchain_mode, embed,
+                                 *loaders,
+                                 api_name='/add_file_api')
             assert res[0] is None
             assert res[1] == langchain_mode
             # assert os.path.basename(test_file_server) in res[2]
@@ -168,6 +175,7 @@ def test_perf_benchmarks(backend, base_model, task, bits, ngpus):
                           max_time=300,
                           do_sample=False,
                           prompt_summary='Summarize into single paragraph',
+                          system_prompt='',
                           )
 
             t0 = time.time()
