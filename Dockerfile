@@ -16,7 +16,7 @@ ARG PATH="/h2ogpt_conda/bin:${PATH}"
 RUN wget https://repo.anaconda.com/miniconda/Miniconda3-py310_23.1.0-1-Linux-x86_64.sh && \
     mkdir -p h2ogpt_conda && \
     bash ./Miniconda3-py310_23.1.0-1-Linux-x86_64.sh -b -u -p /h2ogpt_conda && \
-    conda install python=3.10 pygobject -c conda-forge -y
+    conda install python=3.10 pygobject weasyprint -c conda-forge -y
 
 WORKDIR /workspace
 
@@ -26,14 +26,16 @@ COPY requirements.txt requirements.txt
 COPY reqs_optional reqs_optional
 
 RUN python3.10 -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
-RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.txt
-RUN python3.10 -m pip install -r reqs_optional/requirements_optional_gpt4all.txt
-RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.gpllike.txt
-RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.urls.txt
+RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.txt --extra-index-url https://download.pytorch.org/whl/cu118
+RUN python3.10 -m pip install -r reqs_optional/requirements_optional_gpt4all.txt --extra-index-url https://download.pytorch.org/whl/cu118
+RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.gpllike.txt --extra-index-url https://download.pytorch.org/whl/cu118
+RUN python3.10 -m pip install -r reqs_optional/requirements_optional_langchain.urls.txt --extra-index-url https://download.pytorch.org/whl/cu118
 
-RUN python3.10 -m pip install -r reqs_optional/requirements_optional_doctr.txt
+RUN python3.10 -m pip install -r reqs_optional/requirements_optional_doctr.txt --extra-index-url https://download.pytorch.org/whl/cu118
 # go back to older onnx so Tesseract OCR still works
-RUN python3.10 -m pip install onnxruntime==1.15.0 onnxruntime-gpu==1.15.0
+RUN python3.10 -m pip install onnxruntime==1.15.0 onnxruntime-gpu==1.15.0 --extra-index-url https://download.pytorch.org/whl/cu118 && \
+    python3.10 -m pip uninstall -y weasyprint && \
+    python3.10 -m pip install weasyprint
 
 ENV CUDA_HOME=/usr/local/cuda-11.8
 
@@ -60,7 +62,7 @@ RUN sp=`python3.10 -c 'import site; print(site.getsitepackages()[0])'` && \
     find openai_vllm -name '*.py' | xargs sed -i 's/from openai\./from openai_vllm./g' && \
     find openai_vllm -name '*.py' | xargs sed -i 's/import openai/import openai_vllm/g' && \
     conda create -n vllm python=3.10 -y && \
-    /h2ogpt_conda/envs/vllm/bin/python3.10 -m pip install vllm ray pandas && \
+    /h2ogpt_conda/envs/vllm/bin/python3.10 -m pip install vllm ray pandas --extra-index-url https://download.pytorch.org/whl/cu118 && \
     mkdir ${VLLM_CACHE}
 
 EXPOSE 8888
@@ -69,13 +71,6 @@ EXPOSE 5000
 
 # /workspace/.cache is the equivalent to ~/.cache
 ENV HOME=/workspace
-
-# cache directory for the HF and Torch models
-ENV TRANSFORMERS_CACHE=/workspace/.cache/huggingface/transformers/
-ENV HF_HOME=/workspace/.cache/huggingface/
-ENV TIKTOKEN_CACHE_DIR=/workspace/.cache/
-ENV XDG_CACHE_HOME=/workspace/.cache/
-ENV TORCH_HOME=/workspace/.cache/torch/
 
 COPY build_info.txt* /build_info.txt
 RUN touch /build_info.txt

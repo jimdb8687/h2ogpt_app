@@ -34,9 +34,11 @@ def run_cli(  # for local function:
         url_loaders=None,
         jq_schema=None,
         # for evaluate kwargs
+        use_system_prompt=None,
         captions_model=None,
         caption_loader=None,
         doctr_loader=None,
+        pix2struct_loader=None,
         image_loaders_options0=None,
         pdf_loaders_options0=None,
         url_loaders_options0=None,

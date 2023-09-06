@@ -1075,6 +1075,7 @@ import distutils.spawn
 have_tesseract = distutils.spawn.find_executable("tesseract")
 have_libreoffice = distutils.spawn.find_executable("libreoffice")
 try:
+    from weasyprint import HTML
     import doctr
     have_doctr = True
 except:
@@ -1195,18 +1196,23 @@ def url_alive(url):
             return False
 
 
-def dict_to_html(x, small=True):
+def dict_to_html(x, small=True, api=False):
     df = pd.DataFrame(x.items(), columns=['Key', 'Value'])
     df.index = df.index + 1
     df.index.name = 'index'
-    res = tabulate.tabulate(df, headers='keys', tablefmt='unsafehtml')
-    if small:
-        return "<small>" + res + "</small>"
+    if api:
+        return tabulate.tabulate(df, headers='keys')
     else:
-        return res
+        res = tabulate.tabulate(df, headers='keys', tablefmt='unsafehtml')
+        if small:
+            return "<small>" + res + "</small>"
+        else:
+            return res
 
 
-def text_to_html(x):
+def text_to_html(x, api=False):
+    if api:
+        return x
     return """
 <style>
       pre {
@@ -1232,7 +1238,7 @@ def lg_to_gr(
     n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     n_gpus, gpu_ids = cuda_vis_check(n_gpus)
     if n_gpus != 0:
-        image_loaders_options = ['Caption', 'CaptionBlip2']
+        image_loaders_options = ['Caption', 'CaptionBlip2', 'Pix2Struct']
     else:
         image_loaders_options = ['Caption']
     if have_tesseract:
@@ -1255,6 +1261,8 @@ def lg_to_gr(
     pdf_loaders_options = ['PyMuPDF', 'Unstructured', 'PyPDF', 'TryHTML']
     if have_tesseract:
         pdf_loaders_options.append('OCR')
+    if have_doctr:
+        pdf_loaders_options.append('DocTR')
     pdf_loaders_options0 = ['PyMuPDF']
     assert len(set(pdf_loaders_options0).difference(pdf_loaders_options)) == 0
     if kwargs['enable_pdf_ocr'] == 'on':

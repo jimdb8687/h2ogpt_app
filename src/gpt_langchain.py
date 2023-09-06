@@ -33,7 +33,7 @@ from tqdm import tqdm
 from enums import DocumentSubset, no_lora_str, model_token_mapping, source_prefix, source_postfix, non_query_commands, \
     LangChainAction, LangChainMode, DocumentChoice, LangChainTypes, font_size, head_acc, super_source_prefix, \
     super_source_postfix, langchain_modes_intrinsic, get_langchain_prompts
-from evaluate_params import gen_hyper
+from evaluate_params import gen_hyper, gen_hyper0
 from gen import get_model, SEED
 from prompter import non_hf_types, PromptType, Prompter
 from utils import wrapped_partial, EThread, import_matplotlib, sanitize_filename, makedirs, get_url, flatten_list, \
@@ -1191,9 +1191,6 @@ def get_llm(use_openai_model=False,
         max_max_tokens = tokenizer.model_max_length
         only_new_text = True
         gen_kwargs = dict(do_sample=do_sample,
-                          temperature=temperature,
-                          top_k=top_k,
-                          top_p=top_p,
                           num_beams=num_beams,
                           max_new_tokens=max_new_tokens,
                           min_new_tokens=min_new_tokens,
@@ -1203,7 +1200,13 @@ def get_llm(use_openai_model=False,
                           num_return_sequences=num_return_sequences,
                           return_full_text=not only_new_text,
                           handle_long_generation=None)
-        assert len(set(gen_hyper).difference(gen_kwargs.keys())) == 0
+        if do_sample:
+            gen_kwargs.update(dict(temperature=temperature,
+                                   top_k=top_k,
+                                   top_p=top_p))
+            assert len(set(gen_hyper).difference(gen_kwargs.keys())) == 0
+        else:
+            assert len(set(gen_hyper0).difference(gen_kwargs.keys())) == 0
 
         if stream_output:
             skip_prompt = only_new_text
@@ -1374,7 +1377,7 @@ def get_dai_docs(from_hf=False, get_pickle=True):
 
 
 def get_supported_types():
-    non_image_types0 = ["pdf", "txt", "csv", "toml", "py", "rst", "rtf",
+    non_image_types0 = ["pdf", "txt", "csv", "toml", "py", "rst", "xml", "rtf",
                         "md",
                         "html", "mhtml", "htm",
                         "enex", "eml", "epub", "odt", "pptx", "ppt",
@@ -1417,19 +1420,20 @@ if have_jq:
 file_types = non_image_types + image_types
 
 
-def try_as_html(doc1, file):
+def try_as_html(file):
     # try treating as html as occurs when scraping websites
-    if len(doc1) == 0:
-        from bs4 import BeautifulSoup
-        with open(file, "rt") as f:
-            try:
-                is_html = bool(BeautifulSoup(f.read(), "html.parser").find())
-            except:  # FIXME
-                is_html = False
-        if is_html:
-            file_url = 'file://' + file
-            doc1 = UnstructuredURLLoader(urls=[file_url]).load()
-            doc1 = [x for x in doc1 if x.page_content]
+    from bs4 import BeautifulSoup
+    with open(file, "rt") as f:
+        try:
+            is_html = bool(BeautifulSoup(f.read(), "html.parser").find())
+        except:  # FIXME
+            is_html = False
+    if is_html:
+        file_url = 'file://' + file
+        doc1 = UnstructuredURLLoader(urls=[file_url]).load()
+        doc1 = [x for x in doc1 if x.page_content]
+    else:
+        doc1 = []
     return doc1
 
 
@@ -1484,14 +1488,17 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
                 use_pypdf=False,
                 enable_pdf_ocr='auto',
                 try_pdf_as_html=True,
+                enable_pdf_doctr=False,
 
                 # images
                 enable_ocr=False,
                 enable_doctr=False,
+                enable_pix2struct=False,
                 enable_captions=True,
                 captions_model=None,
                 caption_loader=None,
                 doctr_loader=None,
+                pix2struct_loader=None,
 
                 # json
                 jq_schema='.[]',
@@ -1524,15 +1531,18 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
                                           use_unstructured_pdf=use_unstructured_pdf,
                                           use_pypdf=use_pypdf,
                                           enable_pdf_ocr=enable_pdf_ocr,
+                                          enable_pdf_doctr=enable_pdf_doctr,
                                           try_pdf_as_html=try_pdf_as_html,
 
                                           # images
                                           enable_ocr=enable_ocr,
                                           enable_doctr=enable_doctr,
+                                          enable_pix2struct=enable_pix2struct,
                                           enable_captions=enable_captions,
                                           captions_model=captions_model,
                                           caption_loader=caption_loader,
                                           doctr_loader=doctr_loader,
+                                          pix2struct_loader=pix2struct_loader,
 
                                           # json
                                           jq_schema=jq_schema,
@@ -1684,53 +1694,88 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
         doc1 = chunk_sources(docs1)
     elif any(file.lower().endswith(x) for x in set_image_types1):
         docs1 = []
+        if verbose:
+            print("BEGIN: Tesseract", flush=True)
         if have_tesseract and enable_ocr:
             # OCR, somewhat works, but not great
-            # docs1.extend(UnstructuredImageLoader(file, strategy='ocr_only').load())
-            docs1a = UnstructuredImageLoader(file, strategy='hi_res').load()
+            docs1a = UnstructuredImageLoader(file, strategy='ocr_only').load()
+            # docs1a = UnstructuredImageLoader(file, strategy='hi_res').load()
             docs1a = [x for x in docs1a if x.page_content]
             add_meta(docs1a, file, headsize, parser='UnstructuredImageLoader')
             docs1.extend(docs1a)
+        if verbose:
+            print("END: Tesseract", flush=True)
         if have_doctr and enable_doctr:
+            if verbose:
+                print("BEGIN: DocTR", flush=True)
             if doctr_loader is not None and not isinstance(doctr_loader, (str, bool)):
-                doctr_loader.set_image_paths([file])
-                docs1c = doctr_loader.load()
-                docs1c = [x for x in docs1c if x.page_content]
-                add_meta(docs1c, file, headsize, parser='doctr_loader')
+                doctr_loader.load_model()
             else:
                 from image_doctr import H2OOCRLoader
                 doctr_loader = H2OOCRLoader()
-                doctr_loader.set_image_paths([file])
-                docs1c = doctr_loader.load()
-                docs1c = [x for x in docs1c if x.page_content]
-                add_meta(docs1c, file, headsize, parser='H2OOCRLoader: %s' % 'DocTR')
+            doctr_loader.set_document_paths([file])
+            docs1c = doctr_loader.load()
+            doctr_loader.unload_model()
+            docs1c = [x for x in docs1c if x.page_content]
+            add_meta(docs1c, file, headsize, parser='H2OOCRLoader: %s' % 'DocTR')
             # caption didn't set source, so fix-up meta
             for doci in docs1c:
-                doci.metadata['source'] = doci.metadata.get('image_path', file)
+                doci.metadata['source'] = doci.metadata.get('document_path', file)
                 doci.metadata['hashid'] = hash_file(doci.metadata['source'])
             docs1.extend(docs1c)
+            if verbose:
+                print("END: DocTR", flush=True)
         if enable_captions:
             # BLIP
+            if verbose:
+                print("BEGIN: BLIP", flush=True)
             if caption_loader is not None and not isinstance(caption_loader, (str, bool)):
                 # assumes didn't fork into this process with joblib, else can deadlock
-                caption_loader.set_image_paths([file])
-                docs1c = caption_loader.load()
-                docs1c = [x for x in docs1c if x.page_content]
-                add_meta(docs1c, file, headsize, parser='caption_loader')
+                if not caption_loader.load_in_8bit:
+                    caption_loader.model.to(caption_loader.model.device)
             else:
                 from image_captions import H2OImageCaptionLoader
                 caption_loader = H2OImageCaptionLoader(caption_gpu=caption_loader == 'gpu',
                                                        blip_model=captions_model,
                                                        blip_processor=captions_model)
-                caption_loader.set_image_paths([file])
-                docs1c = caption_loader.load()
-                docs1c = [x for x in docs1c if x.page_content]
-                add_meta(docs1c, file, headsize, parser='H2OImageCaptionLoader: %s' % captions_model)
+            caption_loader.set_image_paths([file])
+            docs1c = caption_loader.load()
+            docs1c = [x for x in docs1c if x.page_content]
+            add_meta(docs1c, file, headsize, parser='H2OImageCaptionLoader: %s' % captions_model)
             # caption didn't set source, so fix-up meta
             for doci in docs1c:
                 doci.metadata['source'] = doci.metadata.get('image_path', file)
                 doci.metadata['hashid'] = hash_file(doci.metadata['source'])
             docs1.extend(docs1c)
+
+            # clear off GPU since will be reloaded later
+            if hasattr(caption_loader.model, 'cpu'):
+                caption_loader.model.cpu()
+                clear_torch_cache()
+
+            if verbose:
+                print("END: BLIP", flush=True)
+        if enable_pix2struct:
+            # BLIP
+            if verbose:
+                print("BEGIN: Pix2Struct", flush=True)
+            if pix2struct_loader is not None and not isinstance(pix2struct_loader, (str, bool)):
+                pix2struct_loader = pix2struct_loader.load_model()
+            else:
+                from image_pix2struct import H2OPix2StructLoader
+                pix2struct_loader = H2OPix2StructLoader()
+            pix2struct_loader.set_image_paths([file])
+            docs1c = pix2struct_loader.load()
+            docs1c = [x for x in docs1c if x.page_content]
+            add_meta(docs1c, file, headsize, parser='H2OPix2StructLoader: %s' % pix2struct_loader)
+            # caption didn't set source, so fix-up meta
+            for doci in docs1c:
+                doci.metadata['source'] = doci.metadata.get('image_path', file)
+                doci.metadata['hashid'] = hash_file(doci.metadata['source'])
+            docs1.extend(docs1c)
+            pix2struct_loader.unload_model()
+            if verbose:
+                print("END: Pix2Struct", flush=True)
         doc1 = chunk_sources(docs1)
     elif file.lower().endswith('.msg'):
         raise RuntimeError("Not supported, GPL3 license")
@@ -1785,6 +1830,8 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
     elif file.lower().endswith('.pdf'):
         doc1 = []
         handled = False
+        did_pymupdf = False
+        did_unstructured = False
         e = None
         if have_pymupdf and use_pymupdf:
             # GPL, only use if installed
@@ -1792,7 +1839,9 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             # load() still chunks by pages, but every page has title at start to help
             try:
                 doc1a = PyMuPDFLoader(file).load()
+                did_pymupdf = True
             except BaseException as e0:
+                doc1a = []
                 print("PyMuPDFLoader: %s" % str(e0), flush=True)
                 e = e0
             # remove empty documents
@@ -1804,7 +1853,9 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
         if len(doc1) == 0 or use_unstructured_pdf:
             try:
                 doc1a = UnstructuredPDFLoader(file).load()
+                did_unstructured = True
             except BaseException as e0:
+                doc1a = []
                 print("UnstructuredPDFLoader: %s" % str(e0), flush=True)
                 e = e0
             handled |= len(doc1a) > 0
@@ -1819,6 +1870,7 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             try:
                 doc1a = PyPDFLoader(file).load()
             except BaseException as e0:
+                doc1a = []
                 print("PyPDFLoader: %s" % str(e0), flush=True)
                 e = e0
             handled |= len(doc1a) > 0
@@ -1827,8 +1879,7 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             doc1a = clean_doc(doc1a)
             add_parser(doc1a, 'PyPDFLoader')
             doc1.extend(doc1a)
-        if ((have_pymupdf and len(doc1) == 0) and
-                (have_pymupdf and use_pymupdf)):
+        if not did_pymupdf and ((have_pymupdf and len(doc1) == 0) and (have_pymupdf and use_pymupdf)):
             # try again in case only others used, but only if didn't already try (2nd part of and)
             # GPL, only use if installed
             from langchain.document_loaders import PyMuPDFLoader
@@ -1836,6 +1887,7 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             try:
                 doc1a = PyMuPDFLoader(file).load()
             except BaseException as e0:
+                doc1a = []
                 print("PyMuPDFLoader: %s" % str(e0), flush=True)
                 e = e0
             handled |= len(doc1a) > 0
@@ -1845,10 +1897,12 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             add_parser(doc1a, 'PyMuPDFLoader2')
             doc1.extend(doc1a)
         if try_pdf_as_html:
-            doc1a = try_as_html(doc1, file)
+            doc1a = try_as_html(file)
             add_parser(doc1a, 'try_as_html')
             doc1.extend(doc1a)
-        if len(doc1) == 0 and enable_pdf_ocr == 'auto' or enable_pdf_ocr == 'on':
+        if not did_unstructured and (
+                len(doc1) == 0 and (enable_pdf_ocr == 'auto' and not enable_pdf_doctr)
+                or enable_pdf_ocr == 'on'):
             # try OCR in end since slowest, but works on pure image pages well
             doc1a = UnstructuredPDFLoader(file, strategy='ocr_only').load()
             handled |= len(doc1a) > 0
@@ -1858,6 +1912,28 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
             # seems to not need cleaning in most cases
             doc1.extend(doc1a)
         # Some PDFs return nothing or junk from PDFMinerLoader
+        if len(doc1) == 0 or enable_pdf_doctr:
+            if verbose:
+                print("BEGIN: DocTR", flush=True)
+            if doctr_loader is not None and not isinstance(doctr_loader, (str, bool)):
+                doctr_loader.load_model()
+            else:
+                from image_doctr import H2OOCRLoader
+                doctr_loader = H2OOCRLoader()
+            doctr_loader.set_document_paths([file])
+            doc1a = doctr_loader.load()
+            doc1a = [x for x in doc1a if x.page_content]
+            add_meta(doc1a, file, headsize, parser='H2OOCRLoader: %s' % 'DocTR')
+            handled |= len(doc1a) > 0
+            # caption didn't set source, so fix-up meta
+            for doci in doc1a:
+                doci.metadata['source'] = doci.metadata.get('document_path', file)
+                doci.metadata['hashid'] = hash_file(doci.metadata['source'])
+            doc1.extend(doc1a)
+            doctr_loader.unload_model()
+            if verbose:
+                print("END: DocTR", flush=True)
+
         if len(doc1) == 0:
             # if literally nothing, show failed to parse so user knows, since unlikely nothing in PDF at all.
             if handled:
@@ -1885,6 +1961,11 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
         doc1 = TomlLoader(file).load()
         add_meta(doc1, file, headsize, parser='TomlLoader')
         doc1 = chunk_sources(doc1)
+    elif file.lower().endswith('.xml'):
+        from langchain.document_loaders import UnstructuredXMLLoader
+        loader = UnstructuredXMLLoader(file_path=file)
+        doc1 = loader.load()
+        add_meta(doc1, file, headsize, parser='UnstructuredXMLLoader')
     elif file.lower().endswith('.urls'):
         with open(file, "r") as f:
             urls = f.readlines()
@@ -1920,15 +2001,18 @@ def file_to_doc(file, base_path=None, verbose=False, fail_any_exception=False,
                            use_unstructured_pdf=use_unstructured_pdf,
                            use_pypdf=use_pypdf,
                            enable_pdf_ocr=enable_pdf_ocr,
+                           enable_pdf_doctr=enable_pdf_doctr,
                            try_pdf_as_html=try_pdf_as_html,
 
                            # images
                            enable_ocr=enable_ocr,
                            enable_doctr=enable_doctr,
+                           enable_pix2struct=enable_pix2struct,
                            enable_captions=enable_captions,
                            captions_model=captions_model,
                            caption_loader=caption_loader,
                            doctr_loader=doctr_loader,
+                           pix2struct_loader=pix2struct_loader,
 
                            # json
                            jq_schema=jq_schema,
@@ -1968,15 +2052,18 @@ def path_to_doc1(file, verbose=False, fail_any_exception=False, return_file=True
                  use_unstructured_pdf=False,
                  use_pypdf=False,
                  enable_pdf_ocr='auto',
+                 enable_pdf_doctr=False,
                  try_pdf_as_html=True,
 
                  # images
                  enable_ocr=False,
                  enable_doctr=False,
+                 enable_pix2struct=False,
                  enable_captions=True,
                  captions_model=None,
                  caption_loader=None,
                  doctr_loader=None,
+                 pix2struct_loader=None,
 
                  # json
                  jq_schema='.[]',
@@ -2009,15 +2096,18 @@ def path_to_doc1(file, verbose=False, fail_any_exception=False, return_file=True
                           use_unstructured_pdf=use_unstructured_pdf,
                           use_pypdf=use_pypdf,
                           enable_pdf_ocr=enable_pdf_ocr,
+                          enable_pdf_doctr=enable_pdf_doctr,
                           try_pdf_as_html=try_pdf_as_html,
 
                           # images
                           enable_ocr=enable_ocr,
                           enable_doctr=enable_doctr,
+                          enable_pix2struct=enable_pix2struct,
                           enable_captions=enable_captions,
                           captions_model=captions_model,
                           caption_loader=caption_loader,
                           doctr_loader=doctr_loader,
+                          pix2struct_loader=pix2struct_loader,
 
                           # json
                           jq_schema=jq_schema,
@@ -2066,15 +2156,18 @@ def path_to_docs(path_or_paths, verbose=False, fail_any_exception=False, n_jobs=
                  use_unstructured_pdf=False,
                  use_pypdf=False,
                  enable_pdf_ocr='auto',
+                 enable_pdf_doctr=False,
                  try_pdf_as_html=True,
 
                  # images
                  enable_ocr=False,
                  enable_doctr=False,
+                 enable_pix2struct=False,
                  enable_captions=True,
                  captions_model=None,
                  caption_loader=None,
                  doctr_loader=None,
+                 pix2struct_loader=None,
 
                  # json
                  jq_schema='.[]',
@@ -2183,15 +2276,18 @@ def path_to_docs(path_or_paths, verbose=False, fail_any_exception=False, n_jobs=
                   use_unstructured_pdf=use_unstructured_pdf,
                   use_pypdf=use_pypdf,
                   enable_pdf_ocr=enable_pdf_ocr,
+                  enable_pdf_doctr=enable_pdf_doctr,
                   try_pdf_as_html=try_pdf_as_html,
 
                   # images
                   enable_ocr=enable_ocr,
                   enable_doctr=enable_doctr,
+                  enable_pix2struct=enable_pix2struct,
                   enable_captions=enable_captions,
                   captions_model=captions_model,
                   caption_loader=caption_loader,
                   doctr_loader=doctr_loader,
+                  pix2struct_loader=pix2struct_loader,
 
                   # json
                   jq_schema=jq_schema,
@@ -2199,7 +2295,6 @@ def path_to_docs(path_or_paths, verbose=False, fail_any_exception=False, n_jobs=
                   db_type=db_type,
                   selected_file_types=selected_file_types,
                   )
-
     if n_jobs != 1 and len(globs_non_image_types) > 1:
         # avoid nesting, e.g. upload 1 zip and then inside many files
         # harder to handle if upload many zips with many files, inner parallel one will be disabled by joblib
@@ -2532,15 +2627,18 @@ def _make_db(use_openai_embedding=False,
              use_unstructured_pdf=False,
              use_pypdf=False,
              enable_pdf_ocr='auto',
+             enable_pdf_doctr=False,
              try_pdf_as_html=True,
 
              # images
              enable_ocr=False,
              enable_doctr=False,
+             enable_pix2struct=False,
              enable_captions=True,
              captions_model=None,
              caption_loader=None,
              doctr_loader=None,
+             pix2struct_loader=None,
 
              # json
              jq_schema='.[]',
@@ -2619,15 +2717,18 @@ def _make_db(use_openai_embedding=False,
                                 use_unstructured_pdf=use_unstructured_pdf,
                                 use_pypdf=use_pypdf,
                                 enable_pdf_ocr=enable_pdf_ocr,
+                                enable_pdf_doctr=enable_pdf_doctr,
                                 try_pdf_as_html=try_pdf_as_html,
 
                                 # images
                                 enable_ocr=enable_ocr,
                                 enable_doctr=enable_doctr,
+                                enable_pix2struct=enable_pix2struct,
                                 enable_captions=enable_captions,
                                 captions_model=captions_model,
                                 caption_loader=caption_loader,
                                 doctr_loader=doctr_loader,
+                                pix2struct_loader=pix2struct_loader,
 
                                 # json
                                 jq_schema=jq_schema,
@@ -2806,15 +2907,18 @@ def _run_qa_db(query=None,
                use_unstructured_pdf=False,
                use_pypdf=False,
                enable_pdf_ocr='auto',
+               enable_pdf_doctr=False,
                try_pdf_as_html=True,
 
                # images
                enable_ocr=False,
                enable_doctr=False,
+               enable_pix2struct=False,
                enable_captions=True,
                captions_model=None,
                caption_loader=None,
                doctr_loader=None,
+               pix2struct_loader=None,
 
                # json
                jq_schema='.[]',
@@ -3138,15 +3242,18 @@ def get_chain(query=None,
               use_unstructured_pdf=False,
               use_pypdf=False,
               enable_pdf_ocr='auto',
+              enable_pdf_doctr=False,
               try_pdf_as_html=True,
 
               # images
               enable_ocr=False,
               enable_doctr=False,
+              enable_pix2struct=False,
               enable_captions=True,
               captions_model=None,
               caption_loader=None,
               doctr_loader=None,
+              pix2struct_loader=None,
 
               # json
               jq_schema='.[]',
@@ -3239,15 +3346,18 @@ def get_chain(query=None,
                                                         use_unstructured_pdf=use_unstructured_pdf,
                                                         use_pypdf=use_pypdf,
                                                         enable_pdf_ocr=enable_pdf_ocr,
+                                                        enable_pdf_doctr=enable_pdf_doctr,
                                                         try_pdf_as_html=try_pdf_as_html,
 
                                                         # images
                                                         enable_ocr=enable_ocr,
                                                         enable_doctr=enable_doctr,
+                                                        enable_pix2struct=enable_pix2struct,
                                                         enable_captions=enable_captions,
                                                         captions_model=captions_model,
                                                         caption_loader=caption_loader,
                                                         doctr_loader=doctr_loader,
+                                                        pix2struct_loader=pix2struct_loader,
 
                                                         # json
                                                         jq_schema=jq_schema,
@@ -3588,7 +3698,8 @@ def get_sources_answer(query, docs, answer, scores, show_rank,
         return ret, extra
 
     if answer_with_sources == -1:
-        extra = [dict(score=score, content=get_doc(x), source=get_source(x)) for score, x in zip(scores, docs)][:top_k_docs_max_show]
+        extra = [dict(score=score, content=get_doc(x), source=get_source(x)) for score, x in zip(scores, docs)][
+                :top_k_docs_max_show]
         if reverse_docs:
             # undo reverse for context filling since not using scores here
             extra.reverse()
@@ -3874,15 +3985,18 @@ def _update_user_db(file,
                     use_unstructured_pdf=False,
                     use_pypdf=False,
                     enable_pdf_ocr='auto',
+                    enable_pdf_doctr=False,
                     try_pdf_as_html=True,
 
                     # images
                     enable_ocr=False,
                     enable_doctr=False,
+                    enable_pix2struct=False,
                     enable_captions=True,
                     captions_model=None,
                     caption_loader=None,
                     doctr_loader=None,
+                    pix2struct_loader=None,
 
                     # json
                     jq_schema='.[]',
@@ -3910,6 +4024,8 @@ def _update_user_db(file,
     assert enable_ocr is not None
     assert enable_doctr is not None
     assert enable_pdf_ocr is not None
+    assert enable_pdf_doctr is not None
+    assert enable_pix2struct is not None
     assert verbose is not None
 
     if dbs is None:
@@ -3956,6 +4072,8 @@ def _update_user_db(file,
                     if os.path.isfile(new_fil):
                         remove(new_fil)
                     try:
+                        if os.path.dirname(new_fil):
+                            makedirs(os.path.dirname(new_fil))
                         shutil.move(fil, new_fil)
                     except FileExistsError:
                         pass
@@ -3985,15 +4103,18 @@ def _update_user_db(file,
                            use_unstructured_pdf=use_unstructured_pdf,
                            use_pypdf=use_pypdf,
                            enable_pdf_ocr=enable_pdf_ocr,
+                           enable_pdf_doctr=enable_pdf_doctr,
                            try_pdf_as_html=try_pdf_as_html,
 
                            # images
                            enable_ocr=enable_ocr,
                            enable_doctr=enable_doctr,
+                           enable_pix2struct=enable_pix2struct,
                            enable_captions=enable_captions,
                            captions_model=captions_model,
                            caption_loader=caption_loader,
                            doctr_loader=doctr_loader,
+                           pix2struct_loader=pix2struct_loader,
 
                            # json
                            jq_schema=jq_schema,
@@ -4208,15 +4329,18 @@ def update_and_get_source_files_given_langchain_mode(db1s,
                                                      use_unstructured_pdf=False,
                                                      use_pypdf=False,
                                                      enable_pdf_ocr='auto',
+                                                     enable_pdf_doctr=False,
                                                      try_pdf_as_html=True,
 
                                                      # images
                                                      enable_ocr=False,
                                                      enable_doctr=False,
+                                                     enable_pix2struct=False,
                                                      enable_captions=True,
                                                      captions_model=None,
                                                      caption_loader=None,
                                                      doctr_loader=None,
+                                                     pix2struct_loader=None,
 
                                                      # json
                                                      jq_schema='.[]',
@@ -4271,15 +4395,18 @@ def update_and_get_source_files_given_langchain_mode(db1s,
                                                         use_unstructured_pdf=use_unstructured_pdf,
                                                         use_pypdf=use_pypdf,
                                                         enable_pdf_ocr=enable_pdf_ocr,
+                                                        enable_pdf_doctr=enable_pdf_doctr,
                                                         try_pdf_as_html=try_pdf_as_html,
 
                                                         # images
                                                         enable_ocr=enable_ocr,
                                                         enable_doctr=enable_doctr,
+                                                        enable_pix2struct=enable_pix2struct,
                                                         enable_captions=enable_captions,
                                                         captions_model=captions_model,
                                                         caption_loader=caption_loader,
                                                         doctr_loader=doctr_loader,
+                                                        pix2struct_loader=pix2struct_loader,
 
                                                         # json
                                                         jq_schema=jq_schema,

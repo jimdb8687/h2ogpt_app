@@ -197,11 +197,13 @@ def gr_to_lg(image_loaders,
         use_unstructured_pdf='Unstructured' in pdf_loaders,
         use_pypdf='PyPDF' in pdf_loaders,
         enable_pdf_ocr='on' if 'OCR' in pdf_loaders else 'auto',
+        enable_pdf_doctr='DocTR' in pdf_loaders,
         try_pdf_as_html='TryHTML' in pdf_loaders,
 
         # images
         enable_ocr='OCR' in image_loaders,
         enable_doctr='DocTR' in image_loaders,
+        enable_pix2struct='Pix2Struct' in image_loaders,
         enable_captions='Caption' in image_loaders or 'CaptionBlip2' in image_loaders,
     )
     if 'CaptionBlip2' in image_loaders:

@@ -30,7 +30,7 @@ from enums import DocumentSubset, LangChainMode, no_lora_str, model_token_mappin
 from loaders import get_loaders
 from utils import set_seed, clear_torch_cache, NullContext, wrapped_partial, EThread, get_githash, \
     import_matplotlib, get_device, makedirs, get_kwargs, start_faulthandler, get_hf_server, FakeTokenizer, \
-    have_langchain, set_openai, cuda_vis_check, H2O_Fire, lg_to_gr, get_ngpus_vis
+    have_langchain, set_openai, cuda_vis_check, H2O_Fire, lg_to_gr
 
 start_faulthandler()
 import_matplotlib()
@@ -140,6 +140,7 @@ def main(
         input_lines: int = 1,
         gradio_size: str = None,
         show_copy_button: bool = True,
+        large_file_count_mode: bool = False,
 
         auth: Union[typing.List[typing.Tuple[str, str]], str] = None,
         auth_filename: str = None,
@@ -244,17 +245,18 @@ def main(
         use_unstructured_pdf=False,
         use_pypdf=False,
         enable_pdf_ocr='auto',
+        enable_pdf_doctr=False,
         try_pdf_as_html=True,
 
         # images
         enable_ocr=False,
         enable_doctr=False,
+        enable_pix2struct=False,
         enable_captions=True,
+
         pre_load_caption_model: bool = False,
         caption_gpu: bool = True,
         captions_model: str = "Salesforce/blip-image-captioning-base",
-        caption_loader=None,
-        doctr_loader=None,
 
         # json
         jq_schema='.[]',
@@ -412,6 +414,7 @@ def main(
     :param gradio_size: Overall size of text and spaces: "xsmall", "small", "medium", "large".
            Small useful for many chatbots in model_lock mode
     :param show_copy_button: Whether to show copy button for chatbots
+    :param large_file_count_mode: Whether to force manual update to UI of drop-downs, good idea if millions of chunks or documents
 
     :param auth: gradio auth for launcher in form [(user1, pass1), (user2, pass2), ...]
                  e.g. --auth=[('jon','password')] with no spaces
@@ -553,23 +556,46 @@ def main(
     :param auto_reduce_chunks: Whether to automatically reduce top_k_docs to fit context given prompt
     :param max_chunks: If top_k_docs=-1, maximum number of chunks to allow
     :param n_jobs: Number of processors to use when consuming documents (-1 = all, is default)
+
+    :param use_unstructured: Enable unstructured URL loader
+    :param use_playwright: Enable PlayWright URL loader
+    :param use_selenium: Enable Selenium URL loader
+
+    :param use_pymupdf: enable PyMUPDF
+    :param use_unstructured_pdf: enable Unstructured PDF loader
+    :param use_pypdf: enable PyPDF loader
+    :param enable_pdf_ocr: 'auto' means only use OCR if normal text extraction fails.  Useful for pure image-based PDFs with text
+                            'on' means always do OCR as additional parsing of same documents
+                            'off' means don't do OCR (e.g. because it's slow even if 'auto' only would trigger if nothing else worked)
+    :param enable_pdf_doctr: Whether to support doctr on pdfs
+    :param try_pdf_as_html: Try "PDF" as if HTML file, in case web link has .pdf extension but really is just HTML
+
+    :param enable_ocr: Whether to support OCR on images
+    :param enable_doctr: Whether to support doctr on images (using OCR better than enable_ocr=True)
+    :param enable_pix2struct: Whether to support pix2struct on images for captions
     :param enable_captions: Whether to support captions using BLIP for image files as documents,
            then preloads that model if pre_load_caption_model=True
+
+    :param pre_load_caption_model: Whether to preload caption model, or load after forking parallel doc loader
+           parallel loading disabled if preload and have images, to prevent deadlocking on cuda context
+           Recommended if using larger caption model
     :param captions_model: Which model to use for captions.
            captions_model: str = "Salesforce/blip-image-captioning-base",  # continue capable
            captions_model: str = "Salesforce/blip2-flan-t5-xl",   # question/answer capable, 16GB state
            captions_model: str = "Salesforce/blip2-flan-t5-xxl",  # question/answer capable, 60GB state
            Note: opt-based blip2 are not permissive license due to opt and Meta license restrictions
            Disabled for CPU since BLIP requires CUDA
-    :param pre_load_caption_model: Whether to preload caption model, or load after forking parallel doc loader
-           parallel loading disabled if preload and have images, to prevent deadlocking on cuda context
-           Recommended if using larger caption model
     :param caption_gpu: If support caption, then use GPU if exists
-    :param enable_ocr: Whether to support OCR on images
-    :param enable_doctr: Whether to support doctr on images
-    :param enable_pdf_ocr: 'auto' means only use OCR if normal text extraction fails.  Useful for pure image-based PDFs with text
-                            'on' means always do OCR as additional parsing of same documents
-                            'off' means don't do OCR (e.g. because it's slow even if 'auto' only would trigger if nothing else worked)
+
+    :param jq_schema: control json loader
+           By default '.[]' ingests everything in brute-force way, but better to match your schema
+           See: https://python.langchain.com/docs/modules/data_connection/document_loaders/json#using-jsonloader
+
+    :param max_quality: Choose maximum quality ingestion with all available parsers
+           Pro: Catches document when some default parsers would fail
+           Pro: Enables DocTR that has much better OCR than Tesseract
+           Con: Fills DB with results from all parsers, so similarity search gives redundant results
+
     :param enable_heap_analytics: Toggle telemetry.
     :param heap_app_id: App ID for Heap, change to your ID.
     :return:
@@ -657,10 +683,12 @@ def main(
 
     # allow enabling langchain via ENV
     # FIRST PLACE where LangChain referenced, but no imports related to it
-    langchain_mode = os.environ.get("LANGCHAIN_MODE", langchain_mode)
     langchain_modes = ast.literal_eval(os.environ.get("langchain_modes", str(langchain_modes)))
-    if langchain_mode is not None:
-        assert langchain_mode in langchain_modes, "Invalid langchain_mode %s" % langchain_mode
+    if not isinstance(langchain_modes, list):
+        langchain_modes = []
+    # always allow DISABLED
+    if LangChainMode.DISABLED.value not in langchain_modes:
+        langchain_modes.append(LangChainMode.DISABLED.value)
 
     # update
     if isinstance(langchain_mode_paths, str):
@@ -696,11 +724,12 @@ def main(
         if user_path:
             langchain_mode_paths['UserData'] = user_path
 
-    assert langchain_action in langchain_actions, "Invalid langchain_action %s" % langchain_action
+    assert langchain_action in langchain_actions, "Invalid langchain_action %s not in %s" % (langchain_action, langchain_actions)
     assert len(
         set(langchain_agents).difference(langchain_agents_list)) == 0, "Invalid langchain_agents %s" % langchain_agents
 
     # auto-set langchain_mode
+    langchain_mode = os.environ.get("LANGCHAIN_MODE", langchain_mode)
     if have_langchain and langchain_mode is None:
         # start in chat mode, in case just want to chat and don't want to get "No documents to query" by default.
         if LangChainMode.LLM.value in langchain_modes:
@@ -723,6 +752,9 @@ def main(
         # if not set yet, disable
         langchain_mode = LangChainMode.DISABLED.value
         print("Auto set langchain_mode=%s  Have langchain package: %s" % (langchain_mode, have_langchain), flush=True)
+    # go ahead and add
+    if langchain_mode not in langchain_modes:
+        langchain_modes.append(langchain_mode)
 
     if is_public:
         allow_upload_to_user_data = False
@@ -861,6 +893,11 @@ def main(
     if offload_folder:
         offload_folder = makedirs(offload_folder, exist_ok=True, tmp_ok=True, use_base=True)
 
+    # defaults
+    caption_loader = None
+    doctr_loader = None
+    pix2struct_loader = None
+
     image_loaders_options0, image_loaders_options, \
         pdf_loaders_options0, pdf_loaders_options, \
         url_loaders_options0, url_loaders_options = lg_to_gr(**locals())
@@ -898,6 +935,7 @@ def main(
                             pdf_loaders,
                             url_loaders,
                             jq_schema,
+                            use_system_prompt,
                             verbose,
                             )
 
@@ -1882,6 +1920,7 @@ def evaluate(
         captions_model=None,
         caption_loader=None,
         doctr_loader=None,
+        pix2struct_loader=None,
         async_output=None,
         num_async=None,
         src_lang=None,
@@ -1930,6 +1969,7 @@ def evaluate(
         pdf_loaders_options0=None,
         url_loaders_options0=None,
         jq_schema0=None,
+        use_system_prompt=None,
 ):
     # ensure passed these
     assert concurrency_count is not None
@@ -2003,7 +2043,7 @@ def evaluate(
         chosen_model_state = model_state
     elif have_cli_model:
         # USE MODEL SETUP AT CLI
-        assert isinstance(model_state['model'], str)  # expect no fresh model
+        assert isinstance(model_state['model'], (type(None), str))  # expect no fresh model
         chosen_model_state = model_state0
     else:
         raise AssertionError(no_model_msg)
@@ -2073,13 +2113,14 @@ def evaluate(
     num_prompt_tokens = (num_prompt_tokens1 or 0) + (num_prompt_tokens2 or 0) + (num_prompt_tokens3 or 0)
 
     # get prompt
-    prompter = Prompter(prompt_type, prompt_dict, debug=debug, chat=chat, stream_output=stream_output)
+    prompter = Prompter(prompt_type, prompt_dict, debug=debug, chat=chat, stream_output=stream_output,
+                        use_system_prompt=use_system_prompt)
     data_point = dict(context=context, instruction=instruction, input=iinput)
     prompt = prompter.generate_prompt(data_point)
 
     # THIRD PLACE where LangChain referenced, but imports only occur if enabled and have db to use
-    assert langchain_mode in langchain_modes, "Invalid langchain_mode %s" % langchain_mode
-    assert langchain_action in langchain_actions, "Invalid langchain_action %s" % langchain_action
+    assert langchain_mode in langchain_modes, "Invalid langchain_mode %s not in %s" % (langchain_mode, langchain_modes)
+    assert langchain_action in langchain_actions, "Invalid langchain_action %s not in %s" % (langchain_action, langchain_actions)
     assert len(
         set(langchain_agents).difference(langchain_agents_list)) == 0, "Invalid langchain_agents %s" % langchain_agents
 
@@ -2131,7 +2172,8 @@ def evaluate(
         loaders_dict.update(dict(captions_model=captions_model,
                                  caption_loader=caption_loader,
                                  jq_schema=jq_schema,
-                                 doctr_loader=doctr_loader
+                                 doctr_loader=doctr_loader,
+                                 pix2struct_loader=pix2struct_loader,
                                  ))
         for r in run_qa_db(
                 inference_server=inference_server,
@@ -2558,10 +2600,7 @@ def evaluate(
     # required for falcon if multiple threads or asyncio accesses to model during generation
     if use_cache is None:
         use_cache = False if 'falcon' in base_model else True
-    gen_config_kwargs = dict(temperature=float(temperature),
-                             top_p=float(top_p),
-                             top_k=top_k,
-                             num_beams=num_beams,
+    gen_config_kwargs = dict(num_beams=num_beams,
                              do_sample=do_sample,
                              repetition_penalty=float(repetition_penalty),
                              num_return_sequences=num_return_sequences,
@@ -2569,6 +2608,10 @@ def evaluate(
                              remove_invalid_values=True,
                              use_cache=use_cache,
                              )
+    if do_sample:
+        gen_config_kwargs.update(dict(temperature=float(temperature),
+                                      top_p=float(top_p),
+                                      top_k=top_k))
     if True:
         # unclear impact, some odd things going on inside
         # leads to:
@@ -2874,6 +2917,7 @@ def get_generate_params(model_lower,
                         pdf_loaders,
                         url_loaders,
                         jq_schema,
+                        use_system_prompt,
                         verbose,
                         ):
     use_defaults = False
@@ -3065,7 +3109,8 @@ y = np.random.randint(0, 1, 100)
 
     # get prompt_dict from prompt_type, so user can see in UI etc., or for custom do nothing except check format
     prompt_dict, error0 = get_prompt(prompt_type, prompt_dict,
-                                     chat=False, context='', reduced=False, making_context=False, return_dict=True)
+                                     chat=False, context='', reduced=False, making_context=False, return_dict=True,
+                                     use_system_prompt=use_system_prompt)
     if error0:
         raise RuntimeError("Prompt wrong: %s" % error0)
 
